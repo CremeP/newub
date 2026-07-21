@@ -5,13 +5,13 @@ on:
     branches:
       - main
   schedule:
-    - cron: "19 2 */2 * *" # 每两天运行一次
+    - cron: "19 2 */2 * *"
   workflow_dispatch:
     inputs:
       force_update:
-        description: '是否强制更新（忽略版本检查）'
+        description: "是否强制更新（忽略版本检查）"
         required: false
-        default: 'false'
+        default: "false"
 
 permissions:
   contents: write
@@ -19,14 +19,14 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
+
     steps:
       - name: 检出仓库
-        uses: actions/checkout@v5 # 🚀 已升级至 v5，支持新版 Node
+        uses: actions/checkout@v5
 
       - name: 设置环境
         run: |
           echo "REPO_URL=https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases/latest" >> $GITHUB_ENV
-          echo "TARGET_FILE=worker.zip" >> $GITHUB_ENV
 
       - name: 检查并更新 Worker
         id: check_update
@@ -41,48 +41,79 @@ jobs:
           log "本地版本: ${LOCAL_VERSION:-无}"
 
           log "获取最新 Release 信息..."
-          RESPONSE=$(curl -s --retry 3 -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" "$REPO_URL")
+
+          RESPONSE=$(curl -s --retry 3 \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "$REPO_URL")
+
           if [ $? -ne 0 ]; then
             log "ERROR: 无法访问 GitHub API"
             exit 1
           fi
 
           API_ERROR=$(echo "$RESPONSE" | jq -r '.message // empty')
-          if [ ! -z "$API_ERROR" ]; then
+          if [ -n "$API_ERROR" ]; then
             log "ERROR: GitHub API 返回错误信息: $API_ERROR"
             exit 1
           fi
 
           TAG_NAME=$(echo "$RESPONSE" | jq -r '.tag_name')
-          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name == "'"$TARGET_FILE"'") | .browser_download_url' 2>/dev/null)
 
           log "最新版本: $TAG_NAME"
-
-          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
-            log "ERROR: 在 Release $TAG_NAME 中未找到 $TARGET_FILE 附件。"
-            log "可用的附件列表如下："
-            echo "$RESPONSE" | jq -r '.assets[].name'
-            exit 1
-          fi
 
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
 
           FORCE_UPDATE=${{ github.event.inputs.force_update || 'false' }}
+
           if [ "$LOCAL_VERSION" = "$TAG_NAME" ] && [ "$FORCE_UPDATE" != "true" ]; then
             log "已是最新版本，无需更新"
             exit 0
           fi
 
-          log "下载 $TARGET_FILE..."
-          wget -q -O "$TARGET_FILE" "$DOWNLOAD_URL"
-          log "解压 $TARGET_FILE..."
-          unzip -o "$TARGET_FILE"
-          rm "$TARGET_FILE"
+          # 优先寻找 worker.zip，没有则寻找 worker.js
+          ASSET_NAME=$(echo "$RESPONSE" | jq -r '
+            .assets[]
+            | select(.name=="worker.zip" or .name=="worker.js")
+            | .name
+          ' | head -n1)
+
+          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '
+            .assets[]
+            | select(.name=="worker.zip" or .name=="worker.js")
+            | .browser_download_url
+          ' | head -n1)
+
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            log "ERROR: Release $TAG_NAME 中既没有 worker.zip，也没有 worker.js。"
+            log "可用附件："
+            echo "$RESPONSE" | jq -r '.assets[].name'
+            exit 1
+          fi
+
+          log "找到附件：$ASSET_NAME"
+          log "开始下载..."
+
+          wget -q -O "$ASSET_NAME" "$DOWNLOAD_URL"
+
+          if [[ "$ASSET_NAME" == *.zip ]]; then
+            log "检测到 ZIP 包，开始解压..."
+            unzip -o "$ASSET_NAME"
+            rm -f "$ASSET_NAME"
+          elif [[ "$ASSET_NAME" == *.js ]]; then
+            log "检测到 JS 文件，直接使用。"
+            mv -f "$ASSET_NAME" worker.js
+          else
+            log "ERROR: 不支持的附件类型：$ASSET_NAME"
+            exit 1
+          fi
+
           echo "$TAG_NAME" > version.txt
-          log "更新完成，新版本: $TAG_NAME"
+
+          log "更新完成，新版本：$TAG_NAME"
 
       - name: 提交更改
-        uses: stefanzweifel/git-auto-commit-action@v6 # 🚀 已升级至 v6
+        uses: stefanzweifel/git-auto-commit-action@v6
         with:
           commit_message: "🔄 自动同步 Worker 版本: ${{ steps.check_update.outputs.tag_name || '未知' }}"
           commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
